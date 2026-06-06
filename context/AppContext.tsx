@@ -2,7 +2,6 @@
 
 import React, { createContext, useContext, useEffect } from 'react';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
-import { buildSampleData } from '@/lib/sampleData';
 import type { Task, Expense, Revenue, ClientBooking } from '@/lib/types';
 
 interface AppCtx {
@@ -27,16 +26,21 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [revenue, setRevenue] = useLocalStorage<Revenue[]>('revenue', []);
   const [clientBookings, setClientBookings] = useLocalStorage<ClientBooking[]>('client_bookings', []);
 
-  // Seed sample data once
+  // One-time migration: wipe any pre-seeded sample data
   useEffect(() => {
-    if (localStorage.getItem('ph_initialized')) return;
-    const sample = buildSampleData();
-    setTasks(sample.tasks);
-    setPersonalExpenses(sample.personalExpenses);
-    setProfessionalExpenses(sample.professionalExpenses);
-    setRevenue(sample.revenue);
-    setClientBookings(sample.clientBookings);
-    localStorage.setItem('ph_initialized', '1');
+    if (localStorage.getItem('ph_cleared_v2')) return;
+    localStorage.removeItem('tasks');
+    localStorage.removeItem('personal_expenses');
+    localStorage.removeItem('professional_expenses');
+    localStorage.removeItem('revenue');
+    localStorage.removeItem('client_bookings');
+    localStorage.removeItem('ph_initialized');
+    localStorage.setItem('ph_cleared_v2', '1');
+    setTasks([]);
+    setPersonalExpenses([]);
+    setProfessionalExpenses([]);
+    setRevenue([]);
+    setClientBookings([]);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
