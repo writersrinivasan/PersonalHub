@@ -62,7 +62,11 @@ const GCal = {
         localStorage.setItem('gcal_connected', '1');
         await this.fetchEvents();
         this._refreshCalendarBadge();
-        if (currentView === 'schedule') navigate('schedule');
+        // Re-render calendar grid in-place; don't call navigate to avoid afterRender loop
+        if (currentView === 'schedule') {
+          const vc = document.getElementById('view-container');
+          if (vc) { vc.innerHTML = `<div class="fade-in">${renderSchedule()}</div>`; bindCalendarNav(); }
+        }
       }
     });
   },
@@ -293,7 +297,15 @@ async function afterRender(view) {
   if (view === 'dashboard') initDashboardCharts();
   if (view === 'schedule') {
     bindCalendarNav();
-    if (GCal.isConnected) await GCal.fetchEvents().then(() => navigate('schedule'));
+    // Fetch GCal events then re-render calendar grid in-place (no navigate to avoid loop)
+    if (GCal.isConnected) {
+      await GCal.fetchEvents();
+      const vc = document.getElementById('view-container');
+      if (vc) {
+        vc.innerHTML = `<div class="fade-in">${renderSchedule()}</div>`;
+        bindCalendarNav();
+      }
+    }
   }
   if (view === 'revenue') initRevenueChart();
   if (view === 'personal-expenses' || view === 'professional-expenses') initExpenseChart(view === 'personal-expenses' ? 'personal' : 'professional');
