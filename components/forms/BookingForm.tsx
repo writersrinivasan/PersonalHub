@@ -15,6 +15,7 @@ export default function BookingForm({ data }: { data: Record<string, unknown> })
   function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
+    const feeVal = parseFloat(f.get('fee') as string);
     const booking: ClientBooking = {
       id: existing.id || uid(),
       clientName: f.get('clientName') as string,
@@ -25,6 +26,8 @@ export default function BookingForm({ data }: { data: Record<string, unknown> })
       duration: parseInt(f.get('duration') as string),
       status: (f.get('status') as ClientBooking['status']) || 'pending',
       notes: f.get('notes') as string,
+      fee: isNaN(feeVal) || feeVal <= 0 ? undefined : feeVal,
+      recurrence: (f.get('recurrence') as ClientBooking['recurrence']) || 'none',
     };
     if (existing.id) setClientBookings(clientBookings.map((b) => (b.id === existing.id ? booking : b)));
     else setClientBookings([...clientBookings, booking]);
@@ -73,6 +76,21 @@ export default function BookingForm({ data }: { data: Record<string, unknown> })
               <option value="confirmed">Confirmed</option>
               <option value="completed">Completed</option>
               <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Session Fee (₹)</label>
+            <input name="fee" type="number" min="0" step="100" className="form-input" defaultValue={existing.fee ?? ''} placeholder="0 — leave blank if none" />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Recurrence</label>
+            <select name="recurrence" className="form-select" defaultValue={existing.recurrence || 'none'}>
+              <option value="none">One-time</option>
+              <option value="weekly">Weekly</option>
+              <option value="biweekly">Bi-weekly</option>
+              <option value="monthly">Monthly</option>
             </select>
           </div>
         </div>

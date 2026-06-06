@@ -25,6 +25,7 @@ export default function TaskForm({ data }: { data: Record<string, unknown> }) {
       endTime: f.get('endTime') as string,
       description: f.get('description') as string,
       syncedToGCal: existing.syncedToGCal ?? false,
+      recurrence: (f.get('recurrence') as Task['recurrence']) || 'none',
     };
     if (existing.id) {
       setTasks(tasks.map((t) => (t.id === existing.id ? task : t)));
@@ -83,9 +84,20 @@ export default function TaskForm({ data }: { data: Record<string, unknown> }) {
             <input name="startTime" type="time" className="form-input" defaultValue={existing.startTime} />
           </div>
         </div>
-        <div className="form-group">
-          <label className="form-label">End Time</label>
-          <input name="endTime" type="time" className="form-input" defaultValue={existing.endTime} />
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">End Time</label>
+            <input name="endTime" type="time" className="form-input" defaultValue={existing.endTime} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">Recurrence</label>
+            <select name="recurrence" className="form-select" defaultValue={existing.recurrence || 'none'}>
+              <option value="none">No recurrence</option>
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+            </select>
+          </div>
         </div>
         <div className="form-group">
           <label className="form-label">Description</label>

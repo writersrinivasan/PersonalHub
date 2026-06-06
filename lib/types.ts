@@ -10,6 +10,7 @@ export interface Task {
   endTime?: string;
   description?: string;
   syncedToGCal?: boolean;
+  recurrence?: 'none' | 'daily' | 'weekly' | 'monthly';
 }
 
 export interface Expense {
@@ -46,6 +47,8 @@ export interface ClientBooking {
   status: 'pending' | 'confirmed' | 'completed' | 'cancelled';
   notes?: string;
   syncedToGCal?: boolean;
+  fee?: number;
+  recurrence?: 'none' | 'weekly' | 'biweekly' | 'monthly';
 }
 
 export interface BankRow {
