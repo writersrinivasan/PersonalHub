@@ -243,6 +243,170 @@ function initSampleData() {
 }
 
 // ============================================================
+// BANK STATEMENT PARSER
+// ============================================================
+let bankStatementRows = [];   // in-memory only, not persisted
+let bankFilterType = 'all';
+
+const AUTO_CATEGORIES = {
+  'Food':          ['zomato','swiggy','restaurant','dominos','pizza','burger','mcdonalds','kfc','cafe','dhaba','bakery','barbeque','biryani'],
+  'Transport':     ['petrol','fuel','uber','ola','rapido','fastag','nhai','metro','irctc','makemytrip','yatra','indigo','spicejet','vistara','redbus','bus ','auto '],
+  'Utilities':     ['electricity','tata power','bescom','adani elec','bses','water board','municipal','piped gas','igl','mahanagar gas','jio','airtel','vodafone','vi recharge','bsnl','broadband','internet','recharge'],
+  'Entertainment': ['netflix','amazon prime','hotstar','disney','sony liv','spotify','youtube premium','pvr','inox','book my show','bookmyshow'],
+  'Health':        ['pharmacy','hospital','apollo','fortis','max hospital','clinic','medplus','1mg','pharmeasy','healthkart','yoga','gym '],
+  'Shopping':      ['amazon','flipkart','myntra','meesho','ajio','nykaa','reliance retail','dmart','d-mart','big bazaar','shoppers stop','lifestyle'],
+  'Housing':       ['rent','maintenance','society charges','housing','pg ','hostel'],
+  'Education':     ['udemy','coursera','unacademy','byju','school fee','college fee','university','tuition'],
+  'ATM':           ['atm ','atm-','cash withdrawal','atm cash'],
+  'Finance':       ['emi','loan repay','insurance','lic premium','sip','mutual fund','nps','ppf','fd ','rd '],
+};
+const REVENUE_MARKERS = ['salary','sal cr','advance cr','neft cr','rtgs cr','imps cr','credit by','inward neft','interest credit','interest cr','dividend','refund','cashback','reversal'];
+
+function guessCategory(desc) {
+  const d = desc.toLowerCase();
+  if (REVENUE_MARKERS.some(m => d.includes(m))) return { cat: 'Salary / Revenue', isRevenue: true };
+  for (const [cat, kws] of Object.entries(AUTO_CATEGORIES)) {
+    if (kws.some(k => d.includes(k))) return { cat, isRevenue: false };
+  }
+  return { cat: 'Other', isRevenue: false };
+}
+
+function normalizeDate(raw) {
+  if (!raw) return today();
+  const s = raw.trim().replace(/\r/g, '');
+  const parts = s.split(/[\/\-\. ]/);
+  if (parts.length >= 3) {
+    const [a, b, c] = parts.map(p => p.padStart(2, '0'));
+    if (a.length === 4) return `${a}-${b}-${c}`;           // YYYY-MM-DD
+    if (c.length === 4) return `${c}-${b}-${a}`;           // DD-MM-YYYY
+  }
+  // Try native parse as fallback
+  const d = new Date(s);
+  return isNaN(d) ? today() : fmt(d);
+}
+
+function parseAmount(v) {
+  if (!v || v.toString().trim() === '') return 0;
+  const n = parseFloat(v.toString().replace(/[₹,\s]/g, ''));
+  return isNaN(n) ? 0 : Math.abs(n);
+}
+
+function parseBankCsv(text) {
+  // Normalize line endings and split
+  const rawLines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+
+  // Detect delimiter
+  const delimiter = rawLines.slice(0, 5).join('').includes(';') ? ';' : ',';
+
+  const splitRow = row => {
+    const res = []; let cur = '', q = false;
+    for (const ch of row) {
+      if (ch === '"') { q = !q; continue; }
+      if (ch === delimiter && !q) { res.push(cur.trim()); cur = ''; }
+      else cur += ch;
+    }
+    res.push(cur.trim());
+    return res;
+  };
+
+  // Find header row: first row with ≥ 3 delimiters
+  let headerIdx = -1;
+  const lines = rawLines.map(l => l.trim()).filter(Boolean);
+  for (let i = 0; i < Math.min(15, lines.length); i++) {
+    if ((lines[i].match(new RegExp(delimiter === ',' ? ',' : ';', 'g')) || []).length >= 3) {
+      headerIdx = i; break;
+    }
+  }
+  if (headerIdx === -1) return { error: 'Could not find header row in this file.' };
+
+  const headers = splitRow(lines[headerIdx]);
+  const hl = headers.map(h => h.toLowerCase().trim());
+
+  // Flexible column finder
+  const find = (...needles) => {
+    for (const n of needles) {
+      const i = hl.findIndex(h => h.includes(n));
+      if (i !== -1) return i;
+    }
+    return -1;
+  };
+
+  // Detect bank & map columns
+  let dateCol, descCol, debitCol, creditCol, balanceCol;
+
+  if (hl.some(h => h.includes('narration'))) {
+    // HDFC Bank
+    dateCol    = find('date');
+    descCol    = find('narration');
+    debitCol   = find('debit amount', 'debit');
+    creditCol  = find('credit amount', 'credit');
+    balanceCol = find('closing balance', 'balance');
+  } else if (hl.some(h => h.includes('transaction remarks'))) {
+    // ICICI Bank
+    dateCol    = find('transaction date', 'value date');
+    descCol    = find('transaction remarks', 'remarks');
+    debitCol   = find('withdrawal', 'debit');
+    creditCol  = find('deposit', 'credit');
+    balanceCol = find('balance');
+  } else if (hl.some(h => h.includes('txn date'))) {
+    // SBI
+    dateCol    = find('txn date', 'tran date', 'date');
+    descCol    = find('description', 'particulars', 'narration');
+    debitCol   = find('debit', 'dr');
+    creditCol  = find('credit', 'cr');
+    balanceCol = find('balance');
+  } else if (hl.some(h => h.includes('particulars'))) {
+    // Axis Bank / Kotak
+    dateCol    = find('tran date', 'date');
+    descCol    = find('particulars', 'description', 'narration');
+    debitCol   = find('dr', 'debit', 'withdrawal');
+    creditCol  = find('cr', 'credit', 'deposit');
+    balanceCol = find('bal', 'balance');
+  } else {
+    // Generic fallback
+    dateCol    = find('date');
+    descCol    = find('description', 'narration', 'particulars', 'remarks', 'details');
+    debitCol   = find('debit', 'dr', 'withdrawal', 'withdraw');
+    creditCol  = find('credit', 'cr', 'deposit');
+    balanceCol = find('balance', 'bal');
+  }
+
+  if (dateCol === -1 || descCol === -1)
+    return { error: `Column mapping failed. Detected headers: ${headers.join(' | ')}` };
+
+  const rows = [];
+  for (let i = headerIdx + 1; i < lines.length; i++) {
+    const cols = splitRow(lines[i]);
+    const rawDate = cols[dateCol] || '';
+    const desc    = (cols[descCol] || '').replace(/\r/g, '').trim();
+    if (!rawDate || !desc || desc.length < 2) continue;
+
+    const debit  = debitCol  !== -1 ? parseAmount(cols[debitCol])  : 0;
+    const credit = creditCol !== -1 ? parseAmount(cols[creditCol]) : 0;
+    if (debit === 0 && credit === 0) continue;
+
+    const isCredit = credit > 0 && credit >= debit;
+    const amount   = isCredit ? credit : debit;
+    const { cat, isRevenue } = guessCategory(desc);
+
+    rows.push({
+      id:          uid(),
+      date:        normalizeDate(rawDate),
+      description: desc,
+      amount,
+      type:        isCredit ? 'credit' : 'debit',
+      category:    cat,
+      importAs:    isRevenue ? 'revenue' : (isCredit ? 'revenue' : 'personal-expense'),
+      selected:    true,
+      balance:     balanceCol !== -1 ? cols[balanceCol] : ''
+    });
+  }
+
+  if (rows.length === 0) return { error: 'No valid transactions found. Check that debit/credit columns have numeric values.' };
+  return rows;
+}
+
+// ============================================================
 // STATE
 // ============================================================
 let currentView = 'dashboard';
@@ -266,7 +430,8 @@ function navigate(view) {
     'personal-expenses': ['Personal Expenses', 'Track your personal spending'],
     'professional-expenses': ['Business Expenses', 'Track business & tax-deductible expenses'],
     revenue: ['Revenue', 'Track income from all sources'],
-    pnl: ['P&L Calculator', 'Profit & loss overview']
+    pnl: ['P&L Calculator', 'Profit & loss overview'],
+    'bank-statement': ['Bank Statement', 'Upload & import transactions from your bank']
   };
   const [title, subtitle] = titles[view] || ['', ''];
   document.getElementById('page-title').textContent = title;
@@ -285,7 +450,8 @@ function navigate(view) {
     'personal-expenses': () => renderExpenses('personal'),
     'professional-expenses': () => renderExpenses('professional'),
     revenue: renderRevenue,
-    pnl: renderPnL
+    pnl: renderPnL,
+    'bank-statement': renderBankStatement
   };
   if (views[view]) {
     vc.innerHTML = `<div class="fade-in">${views[view]()}</div>`;
@@ -790,6 +956,317 @@ function initPnLChart() {
     options: { plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#f3f4f6' }, ticks: { callback: v => '₹'+(v/1000).toFixed(0)+'k' } }, x: { grid: { display: false } } } }
   });
 }
+
+// ============================================================
+// VIEW: BANK STATEMENT
+// ============================================================
+function renderBankStatement() {
+  if (bankStatementRows.length === 0) return bankUploadZone();
+
+  const visible = bankFilterType === 'all' ? bankStatementRows
+    : bankStatementRows.filter(r => r.type === bankFilterType);
+  const selected  = bankStatementRows.filter(r => r.selected);
+  const debits    = bankStatementRows.filter(r => r.type === 'debit');
+  const credits   = bankStatementRows.filter(r => r.type === 'credit');
+  const totalDeb  = debits.reduce((s,r)  => s + r.amount, 0);
+  const totalCred = credits.reduce((s,r) => s + r.amount, 0);
+
+  const expCategories = Object.keys(AUTO_CATEGORIES).concat(['Other']);
+  const revCategories = ['Salary / Revenue','Freelance','Retainer','Consulting','Investment','Digital Products','Bonus','Other'];
+
+  const categoryOptions = (row) => {
+    const cats = row.importAs === 'revenue' ? revCategories : expCategories;
+    return cats.map(c => `<option value="${escape(c)}" ${row.category === c ? 'selected' : ''}>${c}</option>`).join('');
+  };
+
+  return `
+  <div class="flex items-center justify-between mb-5">
+    <div class="flex gap-4 text-sm items-center">
+      <span class="text-gray-500 font-medium">${bankStatementRows.length} transactions</span>
+      <span class="text-red-600 font-semibold">↓ ${formatCurrency(totalDeb)} debits</span>
+      <span class="text-green-600 font-semibold">↑ ${formatCurrency(totalCred)} credits</span>
+    </div>
+    <div class="flex gap-2">
+      <button class="btn btn-secondary btn-sm" onclick="BankStatement.clear()">← Upload Another</button>
+      <button class="btn btn-primary btn-sm" id="import-btn" onclick="BankStatement.importSelected()" ${selected.length === 0 ? 'disabled style="opacity:0.5"' : ''}>
+        Import ${selected.length} Selected
+      </button>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-3 gap-4 mb-5">
+    ${statCard('Transactions', bankStatementRows.length, 'bg-indigo-50', '#4f46e5', svgTask(), 'total parsed')}
+    ${statCard('Total Debits', formatCurrency(totalDeb), 'bg-red-50', '#dc2626', svgMoney(), `${debits.length} transactions`)}
+    ${statCard('Total Credits', formatCurrency(totalCred), 'bg-green-50', '#059669', svgMoney(), `${credits.length} transactions`)}
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="flex gap-2">
+        <button class="filter-tab ${bankFilterType==='all'?'active':''}" onclick="BankStatement.filter('all',this)">All (${bankStatementRows.length})</button>
+        <button class="filter-tab ${bankFilterType==='debit'?'active':''}" onclick="BankStatement.filter('debit',this)">Debits (${debits.length})</button>
+        <button class="filter-tab ${bankFilterType==='credit'?'active':''}" onclick="BankStatement.filter('credit',this)">Credits (${credits.length})</button>
+      </div>
+      <label class="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+        <input type="checkbox" id="select-all-cb" ${selected.length === bankStatementRows.length ? 'checked' : ''} onchange="BankStatement.selectAll(this.checked)">
+        Select all
+      </label>
+    </div>
+    <div style="overflow-x:auto">
+      <table class="data-table" id="bank-table">
+        <thead><tr>
+          <th style="width:36px"></th>
+          <th>Date</th>
+          <th>Description</th>
+          <th>Amount</th>
+          <th>Type</th>
+          <th>Category</th>
+          <th>Import As</th>
+        </tr></thead>
+        <tbody>
+          ${visible.map(r => `
+          <tr id="brow-${r.id}" class="${!r.selected ? 'opacity-40' : ''}">
+            <td><input type="checkbox" ${r.selected ? 'checked' : ''} onchange="BankStatement.toggle('${r.id}',this.checked)"></td>
+            <td class="text-sm text-gray-600 whitespace-nowrap">${formatDate(r.date)}</td>
+            <td class="text-sm" style="max-width:260px">
+              <div class="truncate" title="${escape(r.description)}">${escape(r.description)}</div>
+            </td>
+            <td class="font-semibold whitespace-nowrap ${r.type === 'debit' ? 'text-red-600' : 'text-green-600'}">
+              ${r.type === 'debit' ? '−' : '+'}${formatCurrency(r.amount)}
+            </td>
+            <td>
+              <span class="badge ${r.type === 'debit' ? 'badge-high' : 'badge-confirmed'}">
+                ${r.type}
+              </span>
+            </td>
+            <td>
+              <select class="form-select" style="font-size:0.75rem;padding:0.3rem 0.5rem"
+                onchange="BankStatement.setCategory('${r.id}',this.value)">
+                ${categoryOptions(r)}
+              </select>
+            </td>
+            <td>
+              <select class="form-select" style="font-size:0.75rem;padding:0.3rem 0.5rem"
+                onchange="BankStatement.setImportAs('${r.id}',this.value)">
+                <option value="personal-expense" ${r.importAs==='personal-expense'?'selected':''}>Personal Expense</option>
+                <option value="professional-expense" ${r.importAs==='professional-expense'?'selected':''}>Business Expense</option>
+                <option value="revenue" ${r.importAs==='revenue'?'selected':''}>Revenue</option>
+                <option value="skip" ${r.importAs==='skip'?'selected':''}>Skip</option>
+              </select>
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+function bankUploadZone() {
+  return `
+  <div class="grid grid-cols-2 gap-6">
+    <div>
+      <div class="upload-zone" id="upload-zone"
+        ondragover="event.preventDefault();this.classList.add('dragover')"
+        ondragleave="this.classList.remove('dragover')"
+        ondrop="BankStatement.handleDrop(event)">
+        <div class="upload-icon">
+          <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width:3rem;height:3rem;color:#6366f1"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
+        </div>
+        <div class="text-gray-700 font-semibold text-base">Drop your bank statement here</div>
+        <div class="text-gray-400 text-sm mt-1">CSV format supported</div>
+        <div class="text-xs text-gray-400 mt-1 mb-4">HDFC · ICICI · SBI · Axis · Kotak · IndusInd and more</div>
+        <label class="btn btn-primary" style="cursor:pointer">
+          Browse File
+          <input type="file" accept=".csv,.txt" style="display:none" onchange="BankStatement.handleFile(this.files[0])">
+        </label>
+      </div>
+    </div>
+
+    <div class="space-y-4">
+      <div class="card">
+        <div class="card-header"><span class="section-title">How to download your statement</span></div>
+        <div class="card-body p-0">
+          ${[
+            ['HDFC Bank',  'NetBanking → Accounts → Request → Download Statement → CSV'],
+            ['ICICI Bank', 'iMobile / NetBanking → Accounts → Statement → Download CSV'],
+            ['SBI',        'YONO or NetBanking → Account Statement → Excel/CSV format'],
+            ['Axis Bank',  'NetBanking → Accounts → Statement of Account → CSV'],
+            ['Kotak',      'NetBanking → Accounts → Account Statement → Download CSV'],
+          ].map(([bank, steps]) => `
+          <div class="flex gap-3 px-5 py-3 border-b border-gray-50 last:border-0">
+            <div class="w-6 h-6 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xs font-bold flex-shrink-0 mt-0.5">
+              ${bank[0]}
+            </div>
+            <div>
+              <div class="text-sm font-semibold text-gray-800">${bank}</div>
+              <div class="text-xs text-gray-500 mt-0.5">${steps}</div>
+            </div>
+          </div>`).join('')}
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><span class="section-title">What happens after upload</span></div>
+        <div class="card-body">
+          <div class="space-y-3 text-sm text-gray-600">
+            <div class="flex gap-2"><span class="text-indigo-500 font-bold">1</span> Transactions are parsed & auto-categorised</div>
+            <div class="flex gap-2"><span class="text-indigo-500 font-bold">2</span> Review & edit each category before importing</div>
+            <div class="flex gap-2"><span class="text-indigo-500 font-bold">3</span> Choose to import as Personal Expense, Business Expense, or Revenue</div>
+            <div class="flex gap-2"><span class="text-indigo-500 font-bold">4</span> Imported entries appear instantly in your Finance sections</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="parse-error" class="hidden mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700"></div>`;
+}
+
+const BankStatement = {
+  handleFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => this._parse(e.target.result);
+    reader.onerror = () => this._showError('Could not read the file.');
+    reader.readAsText(file, 'utf-8');
+  },
+
+  handleDrop(e) {
+    e.preventDefault();
+    document.getElementById('upload-zone')?.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (!file.name.match(/\.(csv|txt)$/i)) {
+      this._showError('Please upload a CSV file. Most banks offer CSV export from their NetBanking portal.');
+      return;
+    }
+    this.handleFile(file);
+  },
+
+  _parse(text) {
+    const result = parseBankCsv(text);
+    if (!Array.isArray(result)) {
+      this._showError(result.error || 'Parse failed.');
+      return;
+    }
+    bankStatementRows = result;
+    bankFilterType = 'all';
+    navigate('bank-statement');
+  },
+
+  _showError(msg) {
+    const el = document.getElementById('parse-error');
+    if (el) { el.textContent = '⚠ ' + msg; el.classList.remove('hidden'); }
+    else alert(msg);
+  },
+
+  clear() {
+    bankStatementRows = [];
+    bankFilterType = 'all';
+    navigate('bank-statement');
+  },
+
+  toggle(id, checked) {
+    const r = bankStatementRows.find(r => r.id === id);
+    if (r) r.selected = checked;
+    const selected = bankStatementRows.filter(r => r.selected);
+    const btn = document.getElementById('import-btn');
+    if (btn) { btn.textContent = `Import ${selected.length} Selected`; btn.disabled = selected.length === 0; btn.style.opacity = selected.length === 0 ? '0.5' : '1'; }
+    const row = document.getElementById('brow-' + id);
+    if (row) row.classList.toggle('opacity-40', !checked);
+    const allCb = document.getElementById('select-all-cb');
+    if (allCb) allCb.checked = selected.length === bankStatementRows.length;
+  },
+
+  selectAll(checked) {
+    bankStatementRows.forEach(r => r.selected = checked);
+    navigate('bank-statement');
+  },
+
+  filter(type, btn) {
+    bankFilterType = type;
+    document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    const tbody = document.getElementById('bank-table')?.querySelector('tbody');
+    if (!tbody) return navigate('bank-statement');
+    const visible = type === 'all' ? bankStatementRows : bankStatementRows.filter(r => r.type === type);
+    const expCats = Object.keys(AUTO_CATEGORIES).concat(['Other']);
+    const revCats = ['Salary / Revenue','Freelance','Retainer','Consulting','Investment','Digital Products','Bonus','Other'];
+    tbody.innerHTML = visible.map(r => {
+      const cats = r.importAs === 'revenue' ? revCats : expCats;
+      const catOpts = cats.map(c => `<option value="${escape(c)}" ${r.category===c?'selected':''}>${c}</option>`).join('');
+      return `<tr id="brow-${r.id}" class="${!r.selected?'opacity-40':''}">
+        <td><input type="checkbox" ${r.selected?'checked':''} onchange="BankStatement.toggle('${r.id}',this.checked)"></td>
+        <td class="text-sm text-gray-600 whitespace-nowrap">${formatDate(r.date)}</td>
+        <td class="text-sm" style="max-width:260px"><div class="truncate" title="${escape(r.description)}">${escape(r.description)}</div></td>
+        <td class="font-semibold whitespace-nowrap ${r.type==='debit'?'text-red-600':'text-green-600'}">${r.type==='debit'?'−':'+'}${formatCurrency(r.amount)}</td>
+        <td><span class="badge ${r.type==='debit'?'badge-high':'badge-confirmed'}">${r.type}</span></td>
+        <td><select class="form-select" style="font-size:0.75rem;padding:0.3rem 0.5rem" onchange="BankStatement.setCategory('${r.id}',this.value)">${catOpts}</select></td>
+        <td><select class="form-select" style="font-size:0.75rem;padding:0.3rem 0.5rem" onchange="BankStatement.setImportAs('${r.id}',this.value)">
+          <option value="personal-expense" ${r.importAs==='personal-expense'?'selected':''}>Personal Expense</option>
+          <option value="professional-expense" ${r.importAs==='professional-expense'?'selected':''}>Business Expense</option>
+          <option value="revenue" ${r.importAs==='revenue'?'selected':''}>Revenue</option>
+          <option value="skip" ${r.importAs==='skip'?'selected':''}>Skip</option>
+        </select></td>
+      </tr>`;
+    }).join('');
+  },
+
+  setCategory(id, val) {
+    const r = bankStatementRows.find(r => r.id === id);
+    if (r) r.category = val;
+  },
+
+  setImportAs(id, val) {
+    const r = bankStatementRows.find(r => r.id === id);
+    if (r) { r.importAs = val; if (val === 'skip') r.selected = false; }
+  },
+
+  importSelected() {
+    const toImport = bankStatementRows.filter(r => r.selected && r.importAs !== 'skip');
+    if (toImport.length === 0) { alert('No transactions selected.'); return; }
+
+    let peCount = 0, beCount = 0, revCount = 0;
+
+    const pe  = DB.get('personal_expenses');
+    const biz = DB.get('professional_expenses');
+    const rev = DB.get('revenue');
+
+    toImport.forEach(r => {
+      if (r.importAs === 'personal-expense') {
+        pe.push({ id: uid(), description: r.description, amount: r.amount, category: r.category, date: r.date, paymentMethod: 'Bank', notes: 'Imported from bank statement' });
+        peCount++;
+      } else if (r.importAs === 'professional-expense') {
+        biz.push({ id: uid(), description: r.description, amount: r.amount, category: r.category, date: r.date, paymentMethod: 'Bank', taxDeductible: true, notes: 'Imported from bank statement' });
+        beCount++;
+      } else if (r.importAs === 'revenue') {
+        rev.push({ id: uid(), source: r.description, amount: r.amount, category: r.category, date: r.date, isRecurring: false, frequency: '', notes: 'Imported from bank statement' });
+        revCount++;
+      }
+    });
+
+    DB.set('personal_expenses', pe);
+    DB.set('professional_expenses', biz);
+    DB.set('revenue', rev);
+
+    // Mark imported rows (remove from pending)
+    bankStatementRows = bankStatementRows.filter(r => !r.selected || r.importAs === 'skip');
+
+    const msg = [`✓ Successfully imported:`];
+    if (peCount) msg.push(`  • ${peCount} personal expenses`);
+    if (beCount) msg.push(`  • ${beCount} business expenses`);
+    if (revCount) msg.push(`  • ${revCount} revenue entries`);
+    if (bankStatementRows.length > 0) msg.push(`\n${bankStatementRows.length} remaining transactions not imported.`);
+
+    alert(msg.join('\n'));
+    if (bankStatementRows.length === 0) {
+      bankStatementRows = [];
+      navigate('bank-statement');
+    } else {
+      navigate('bank-statement');
+    }
+  }
+};
 
 // ============================================================
 // VIEW: CLIENT BOOKINGS
