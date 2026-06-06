@@ -1,12 +1,32 @@
 {
   "name": "personalhub",
-  "version": "1.0.0",
-  "description": "Personal productivity and finance dashboard",
+  "version": "2.0.0",
+  "private": true,
   "scripts": {
-    "build": "node build.js",
-    "dev": "npx serve . -p 8080"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
   },
-  "engines": {
-    "node": ">=18"
+  "dependencies": {
+    "@clerk/nextjs": "^5.0.0",
+    "chart.js": "^4.4.0",
+    "framer-motion": "^11.0.0",
+    "next": "^14.2.0",
+    "pdfjs-dist": "^3.11.174",
+    "react": "^18.3.0",
+    "react-chartjs-2": "^5.2.0",
+    "react-dom": "^18.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.0",
+    "eslint": "^8.0.0",
+    "eslint-config-next": "^14.2.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "typescript": "^5.0.0"
   }
 }
