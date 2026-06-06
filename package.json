@@ -1,0 +1,12 @@
+{
+  "name": "personalhub",
+  "version": "1.0.0",
+  "description": "Personal productivity and finance dashboard",
+  "scripts": {
+    "build": "node build.js",
+    "dev": "npx serve . -p 8080"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

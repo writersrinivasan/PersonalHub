@@ -406,6 +406,114 @@ function parseBankCsv(text) {
   return rows;
 }
 
+async function parseBankPdf(arrayBuffer) {
+  const lib = window.pdfjsLib;
+  if (!lib) return { error: 'PDF.js did not load. Please check your internet connection and refresh.' };
+
+  lib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+  let pdf;
+  try { pdf = await lib.getDocument({ data: arrayBuffer }).promise; }
+  catch (e) { return { error: 'Could not open PDF: ' + e.message }; }
+
+  const allLines = [];
+
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+
+    const lineMap = [];
+    for (const item of content.items) {
+      if (!item.str || !item.str.trim()) continue;
+      const y = item.transform[5], x = item.transform[4];
+      const existing = lineMap.find(l => Math.abs(l.y - y) < 4);
+      if (existing) existing.parts.push({ t: item.str, x });
+      else lineMap.push({ y, parts: [{ t: item.str, x }] });
+    }
+
+    lineMap.sort((a, b) => b.y - a.y);
+    for (const line of lineMap) {
+      line.parts.sort((a, b) => a.x - b.x);
+      const text = line.parts.map(p => p.t).join(' ').replace(/\s{2,}/g, ' ').trim();
+      if (text) allLines.push(text);
+    }
+  }
+
+  if (allLines.length < 5) {
+    return { error: 'This PDF appears to be a scanned image — no text could be extracted. Please download the statement as CSV from your bank portal instead.' };
+  }
+
+  return extractPdfTransactions(allLines);
+}
+
+function extractPdfTransactions(lines) {
+  const DATE_RE = /\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\b/;
+  const AMT_RE  = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)\b/g;
+
+  const rows = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const dm = line.match(DATE_RE);
+    if (!dm) continue;
+
+    const rawDate = dm[1];
+    const dateEnd = line.indexOf(rawDate) + rawDate.length;
+
+    const amts = [...line.matchAll(AMT_RE)]
+      .map(m => ({ v: parseFloat(m[1].replace(/,/g, '')), idx: m.index }))
+      .filter(m => m.v >= 1 && m.v < 100000000);
+
+    if (amts.length === 0) continue;
+
+    const firstAmtIdx = amts[0].idx;
+    let desc = line.slice(dateEnd, firstAmtIdx > dateEnd ? firstAmtIdx : undefined)
+      .replace(/[^\w\s\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (desc.length < 3) {
+      desc = line.slice(dateEnd).replace(AMT_RE, '').replace(/[^\w\s\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    if (!desc || desc.length < 2) desc = 'Bank Transaction';
+
+    const amounts = amts.map(a => a.v);
+    let debit = 0, credit = 0;
+
+    const ctx = (desc + ' ' + line).toLowerCase();
+    const isDr = /\bdr\b|\bdebit\b|\bwdl\b|\bwithdrawal\b|\bpurchase\b/.test(ctx);
+    const isCr = /\bcr\b|\bcredit\b|\bdeposit\b|\bneft cr\b|\brtgs cr\b/.test(ctx);
+
+    if (amounts.length >= 3) {
+      const maxVal = Math.max(...amounts);
+      const txAmts = amounts.filter(v => v !== maxVal);
+      if (isDr) debit = txAmts[0] || amounts[0];
+      else if (isCr) credit = txAmts[0] || amounts[0];
+      else { debit = amounts[0]; credit = amounts[1]; }
+    } else {
+      const txAmt = amounts[0];
+      if (isDr) debit = txAmt;
+      else if (isCr) credit = txAmt;
+      else { const { isRevenue } = guessCategory(desc); if (isRevenue) credit = txAmt; else debit = txAmt; }
+    }
+
+    const isCredit = credit > 0 && credit >= debit;
+    const amount = isCredit ? credit : debit;
+    if (amount === 0 || amount > 50000000) continue;
+
+    const { cat, isRevenue: isRev } = guessCategory(desc);
+    rows.push({
+      id: uid(), date: normalizeDate(rawDate), description: desc,
+      amount, type: isCredit ? 'credit' : 'debit', category: cat,
+      importAs: isRev ? 'revenue' : (isCredit ? 'revenue' : 'personal-expense'),
+      selected: true, balance: amounts[amounts.length - 1] || 0
+    });
+  }
+
+  if (rows.length === 0) {
+    return { error: 'No transactions found in this PDF. The layout may not be supported — try downloading as CSV instead.' };
+  }
+  return rows;
+}
+
 // ============================================================
 // STATE
 // ============================================================
@@ -1073,11 +1181,11 @@ function bankUploadZone() {
           <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width:3rem;height:3rem;color:#6366f1"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg>
         </div>
         <div class="text-gray-700 font-semibold text-base">Drop your bank statement here</div>
-        <div class="text-gray-400 text-sm mt-1">CSV format supported</div>
+        <div class="text-gray-400 text-sm mt-1">CSV or PDF supported</div>
         <div class="text-xs text-gray-400 mt-1 mb-4">HDFC · ICICI · SBI · Axis · Kotak · IndusInd and more</div>
         <label class="btn btn-primary" style="cursor:pointer">
           Browse File
-          <input type="file" accept=".csv,.txt" style="display:none" onchange="BankStatement.handleFile(this.files[0])">
+          <input type="file" accept=".csv,.txt,.pdf" style="display:none" onchange="BankStatement.handleFile(this.files[0])">
         </label>
       </div>
     </div>
@@ -1125,10 +1233,17 @@ function bankUploadZone() {
 const BankStatement = {
   handleFile(file) {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = e => this._parse(e.target.result);
-    reader.onerror = () => this._showError('Could not read the file.');
-    reader.readAsText(file, 'utf-8');
+    if (file.name.match(/\.pdf$/i)) {
+      const reader = new FileReader();
+      reader.onload = e => this._parsePdf(e.target.result);
+      reader.onerror = () => this._showError('Could not read the PDF file.');
+      reader.readAsArrayBuffer(file);
+    } else {
+      const reader = new FileReader();
+      reader.onload = e => this._parse(e.target.result);
+      reader.onerror = () => this._showError('Could not read the file.');
+      reader.readAsText(file, 'utf-8');
+    }
   },
 
   handleDrop(e) {
@@ -1136,8 +1251,8 @@ const BankStatement = {
     document.getElementById('upload-zone')?.classList.remove('dragover');
     const file = e.dataTransfer.files[0];
     if (!file) return;
-    if (!file.name.match(/\.(csv|txt)$/i)) {
-      this._showError('Please upload a CSV file. Most banks offer CSV export from their NetBanking portal.');
+    if (!file.name.match(/\.(csv|txt|pdf)$/i)) {
+      this._showError('Please upload a CSV or PDF bank statement.');
       return;
     }
     this.handleFile(file);
@@ -1147,6 +1262,19 @@ const BankStatement = {
     const result = parseBankCsv(text);
     if (!Array.isArray(result)) {
       this._showError(result.error || 'Parse failed.');
+      return;
+    }
+    bankStatementRows = result;
+    bankFilterType = 'all';
+    navigate('bank-statement');
+  },
+
+  async _parsePdf(arrayBuffer) {
+    const el = document.getElementById('parse-error');
+    if (el) { el.textContent = '⏳ Extracting transactions from PDF…'; el.classList.remove('hidden'); }
+    const result = await parseBankPdf(arrayBuffer);
+    if (!Array.isArray(result)) {
+      this._showError(result.error || 'PDF parse failed.');
       return;
     }
     bankStatementRows = result;
@@ -1811,6 +1939,82 @@ const svgRepeat = () => `<svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" st
 const svgPercent = () => `<svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>`;
 
 // ============================================================
+// AUTH (Clerk)
+// ============================================================
+const Auth = {
+  clerk: null,
+
+  async init() {
+    const pk = window.APP_CONFIG?.clerkKey;
+    if (!pk || pk === '__CLERK_PUBLISHABLE_KEY__' || !pk.startsWith('pk_')) {
+      // Clerk not configured — app runs without auth, remove gate from DOM
+      document.getElementById('auth-gate')?.remove();
+      return;
+    }
+
+    if (!window.Clerk) {
+      console.warn('Clerk.js CDN did not load — running without auth');
+      document.getElementById('auth-gate')?.remove();
+      return;
+    }
+
+    const clerk = new window.Clerk(pk);
+    this.clerk = clerk;
+
+    await clerk.load({
+      appearance: {
+        variables: { colorPrimary: '#4f46e5', borderRadius: '0.75rem' },
+        layout: { socialButtonsPlacement: 'bottom' }
+      }
+    });
+
+    if (clerk.user) {
+      this._enter();
+    } else {
+      this._showGate();
+    }
+
+    clerk.addListener(({ user }) => {
+      if (user) this._enter();
+      else this._showGate();
+    });
+  },
+
+  _showGate() {
+    document.getElementById('signout-btn')?.classList.add('hidden');
+    const gate = document.getElementById('auth-gate');
+    if (!gate) return;
+    gate.classList.remove('hidden');
+    const container = document.getElementById('clerk-sign-in');
+    if (container && container.children.length === 0) {
+      this.clerk.mountSignIn(container);
+    }
+  },
+
+  _enter() {
+    document.getElementById('auth-gate')?.classList.add('hidden');
+    document.getElementById('signout-btn')?.classList.remove('hidden');
+    this._syncUser();
+  },
+
+  _syncUser() {
+    const user = this.clerk?.user;
+    if (!user) return;
+    const name = user.firstName
+      || user.username
+      || user.primaryEmailAddress?.emailAddress?.split('@')[0]
+      || 'User';
+    localStorage.setItem('ph_user', name);
+    document.getElementById('user-name-display').textContent = name;
+    document.getElementById('user-avatar').textContent = name[0].toUpperCase();
+  },
+
+  signOut() {
+    this.clerk?.signOut().catch(() => {});
+  }
+};
+
+// ============================================================
 // INIT
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
@@ -1826,4 +2030,5 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   navigate('dashboard');
+  Auth.init();
 });

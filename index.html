@@ -7,6 +7,9 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <link rel="stylesheet" href="style.css">
+    <!-- Clerk publishable key — replaced at build time by build.js -->
+    <script>window.APP_CONFIG = { clerkKey: '__CLERK_PUBLISHABLE_KEY__' };</script>
+    <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js"></script>
 </head>
 <body class="bg-gray-50 flex h-screen overflow-hidden">
 
@@ -68,11 +71,18 @@
 
         <div class="px-4 py-4 border-t border-indigo-700/50">
             <div class="flex items-center gap-3">
-                <div class="w-9 h-9 bg-indigo-500 rounded-full flex items-center justify-center font-semibold text-white text-sm" id="user-avatar">S</div>
-                <div>
-                    <div class="text-white text-sm font-medium" id="user-name-display">Srinivasan</div>
+                <div class="w-9 h-9 bg-indigo-500 rounded-full flex items-center justify-center font-semibold text-white text-sm flex-shrink-0" id="user-avatar">S</div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-white text-sm font-medium truncate" id="user-name-display">Srinivasan</div>
                     <div class="text-indigo-300 text-xs">Personal Account</div>
                 </div>
+                <button onclick="Auth.signOut()" title="Sign out" id="signout-btn"
+                    class="hidden w-7 h-7 rounded-lg flex items-center justify-center transition-colors flex-shrink-0"
+                    style="background:rgba(255,255,255,0.08)">
+                    <svg style="width:0.9rem;height:0.9rem;color:#a5b4fc" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+                    </svg>
+                </button>
             </div>
         </div>
     </aside>
@@ -102,6 +112,19 @@
         </div>
     </div>
 
+    <!-- Auth Gate — shown when Clerk is configured and user is not signed in -->
+    <div id="auth-gate" class="hidden fixed inset-0 flex items-center justify-center" style="background:linear-gradient(135deg,#1e1b4b 0%,#312e81 45%,#4338ca 100%);z-index:9999">
+        <div class="w-full max-w-sm px-4">
+            <div class="text-center mb-8">
+                <div class="w-16 h-16 rounded-2xl flex items-center justify-center font-bold text-white text-3xl mx-auto mb-4" style="background:rgba(255,255,255,0.15);backdrop-filter:blur(8px)">P</div>
+                <h1 class="text-3xl font-bold text-white">PersonalHub</h1>
+                <p class="text-indigo-300 mt-2 text-sm">Sign in to access your dashboard</p>
+            </div>
+            <div id="clerk-sign-in" class="rounded-2xl overflow-hidden shadow-2xl"></div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
     <script src="app.js"></script>
     <!-- Google Calendar Integration -->
     <script async defer src="https://apis.google.com/js/api.js" onload="GCal.onGapiLoad()"></script>
