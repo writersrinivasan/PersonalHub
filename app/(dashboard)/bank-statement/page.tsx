@@ -15,7 +15,6 @@ export default function BankStatementPage() {
   const [filter, setFilter] = useState<'all' | 'debit' | 'credit'>('all');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const allCats = Object.keys(AUTO_CATEGORIES);
 
@@ -74,29 +73,90 @@ export default function BankStatementPage() {
     alert(`Imported ${toImport.length} transactions.${remaining.length > 0 ? ` ${remaining.length} remaining.` : ''}`);
   }
 
+  const csvRef = useRef<HTMLInputElement>(null);
+  const pdfRef = useRef<HTMLInputElement>(null);
+
   if (rows.length === 0) {
     return (
       <PageTransition>
         <div className="grid grid-cols-2 gap-6">
-          <div>
+          <div className="space-y-4">
+            {/* Drag-and-drop zone */}
             <div
               className="upload-zone"
               onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('dragover'); }}
               onDragLeave={(e) => e.currentTarget.classList.remove('dragover')}
               onDrop={(e) => { e.currentTarget.classList.remove('dragover'); handleDrop(e); }}
             >
-              <svg fill="none" viewBox="0 0 24 24" stroke="#6366f1" style={{ width: '3rem', height: '3rem', marginBottom: '0.5rem' }}>
+              <svg fill="none" viewBox="0 0 24 24" stroke="#6366f1" style={{ width: '2.75rem', height: '2.75rem', marginBottom: '0.25rem' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
               </svg>
-              <div className="text-gray-700 font-semibold text-base">Drop your bank statement here</div>
-              <div className="text-gray-400 text-sm mt-1">{loading ? '⏳ Extracting from PDF…' : 'CSV or PDF supported'}</div>
-              <div className="text-xs text-gray-400 mt-1 mb-4">HDFC · ICICI · SBI · Axis · Kotak · IndusInd</div>
-              <label className="btn btn-primary" style={{ cursor: 'pointer' }}>
-                Browse File
-                <input ref={inputRef} type="file" accept=".csv,.txt,.pdf" style={{ display: 'none' }} onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])} />
-              </label>
+              <div className="text-gray-700 font-semibold">Drop your bank statement here</div>
+              {loading
+                ? <div className="text-indigo-500 text-sm font-medium mt-1">⏳ Extracting transactions from PDF…</div>
+                : <div className="text-gray-400 text-xs mt-1">CSV · PDF · TXT &nbsp;|&nbsp; HDFC · ICICI · SBI · Axis · Kotak</div>
+              }
             </div>
-            {error && <div className="mt-4 p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">⚠ {error}</div>}
+
+            {/* Two explicit browse buttons */}
+            <div className="grid grid-cols-2 gap-3">
+              {/* CSV button */}
+              <motion.label
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-dashed border-green-200 bg-green-50 hover:border-green-400 hover:bg-green-100 transition-all cursor-pointer"
+              >
+                <div className="w-10 h-10 rounded-xl bg-green-100 flex items-center justify-center">
+                  <svg className="w-5 h-5 text-green-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <div className="text-center">
+                  <div className="text-sm font-bold text-green-700">Upload CSV</div>
+                  <div className="text-xs text-green-500 mt-0.5">.csv · .txt</div>
+                  <div className="text-xs text-gray-400 mt-1">Most reliable format</div>
+                </div>
+                <input
+                  ref={csvRef}
+                  type="file"
+                  accept=".csv,.txt"
+                  style={{ display: 'none' }}
+                  onChange={(e) => { if (e.target.files?.[0]) { handleFile(e.target.files[0]); e.target.value = ''; } }}
+                />
+              </motion.label>
+
+              {/* PDF button */}
+              <motion.label
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-dashed border-red-200 bg-red-50 hover:border-red-400 hover:bg-red-100 transition-all cursor-pointer"
+              >
+                <div className="w-10 h-10 rounded-xl bg-red-100 flex items-center justify-center">
+                  <svg className="w-5 h-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  </svg>
+                </div>
+                <div className="text-center">
+                  <div className="text-sm font-bold text-red-600">Upload PDF</div>
+                  <div className="text-xs text-red-400 mt-0.5">.pdf</div>
+                  <div className="text-xs text-gray-400 mt-1">Text-based PDFs only</div>
+                </div>
+                <input
+                  ref={pdfRef}
+                  type="file"
+                  accept=".pdf"
+                  style={{ display: 'none' }}
+                  onChange={(e) => { if (e.target.files?.[0]) { handleFile(e.target.files[0]); e.target.value = ''; } }}
+                />
+              </motion.label>
+            </div>
+
+            {error && (
+              <motion.div initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }}
+                className="p-4 bg-red-50 border border-red-200 rounded-xl text-sm text-red-700">
+                ⚠ {error}
+              </motion.div>
+            )}
           </div>
 
           <div className="space-y-4">
