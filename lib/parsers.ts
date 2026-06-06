@@ -134,40 +134,53 @@ export async function parseBankPdf(arrayBuffer: ArrayBuffer): Promise<BankRow[] 
 }
 
 function extractPdfTransactions(lines: string[]): BankRow[] | { error: string } {
-  const DATE_RE = /\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})\b/;
-  const AMT_RE = /\b(\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?)\b/g;
+  // Matches DD/MM/YYYY, DD-MM-YYYY, and "DD Mon, YYYY" (Kotak/Axis/ICICI style)
+  const DATE_RE = /\b(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*,?\s*\d{4})\b/i;
+  // Require .XX decimal so reference numbers (no decimal) are ignored; capture +/- sign
+  const AMT_RE = /([+-]?[\d,]+\.\d{2})/g;
   const rows: BankRow[] = [];
 
   for (const line of lines) {
     const dm = line.match(DATE_RE);
     if (!dm) continue;
+    // Skip summary/header lines that have dates but aren't transactions
+    if (/opening balance|closing balance|total debit|total credit|sweep td|summary/i.test(line)) continue;
+
     const rawDate = dm[1];
     const dateEnd = line.indexOf(rawDate) + rawDate.length;
-    const amts = [...line.matchAll(AMT_RE)]
-      .map((m) => ({ v: parseFloat(m[1].replace(/,/g, '')), idx: m.index! }))
-      .filter((m) => m.v >= 1 && m.v < 100_000_000);
-    if (amts.length === 0) continue;
 
-    const firstAmtIdx = amts[0].idx;
+    const amtMatches = [...line.matchAll(AMT_RE)].map((m) => ({
+      v: parseFloat(m[1].replace(/,/g, '')),
+      signed: m[1][0] === '+' || m[1][0] === '-',
+      negative: m[1][0] === '-',
+      idx: m.index!,
+    })).filter((m) => Math.abs(m.v) >= 1 && Math.abs(m.v) < 100_000_000);
+
+    if (amtMatches.length === 0) continue;
+
+    const firstAmtIdx = amtMatches[0].idx;
     let desc = line.slice(dateEnd, firstAmtIdx > dateEnd ? firstAmtIdx : undefined)
       .replace(/[^\w\s\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
     if (desc.length < 3) desc = line.slice(dateEnd).replace(AMT_RE, '').replace(/[^\w\s\-\/]/g, ' ').replace(/\s+/g, ' ').trim();
     if (!desc || desc.length < 2) desc = 'Bank Transaction';
 
-    const amounts = amts.map((a) => a.v);
-    const ctx = (desc + ' ' + line).toLowerCase();
-    const isDr = /\bdr\b|\bdebit\b|\bwdl\b|\bwithdrawal\b/.test(ctx);
-    const isCr = /\bcr\b|\bcredit\b|\bdeposit\b/.test(ctx);
-
     let debit = 0, credit = 0;
-    if (amounts.length >= 3) {
-      const maxVal = Math.max(...amounts);
-      const txAmts = amounts.filter((v) => v !== maxVal);
-      if (isDr) debit = txAmts[0] || amounts[0];
-      else if (isCr) credit = txAmts[0] || amounts[0];
-      else { debit = amounts[0]; credit = amounts[1]; }
+    const signedAmts = amtMatches.filter((a) => a.signed);
+
+    if (signedAmts.length > 0) {
+      // Banks like Kotak use explicit +/- on debit/credit columns
+      const neg = signedAmts.find((a) => a.negative);
+      const pos = signedAmts.find((a) => !a.negative);
+      if (neg) debit = Math.abs(neg.v);
+      if (pos) credit = pos.v;
     } else {
-      const txAmt = amounts[0];
+      // Fallback for PDFs without signed amounts
+      const amounts = amtMatches.map((a) => a.v);
+      const ctx = (desc + ' ' + line).toLowerCase();
+      const isDr = /\bdr\b|\bdebit\b|\bwdl\b|\bwithdrawal\b/.test(ctx);
+      const isCr = /\bcr\b|\bcredit\b|\bdeposit\b|\brtgs\b|\bneft\b|\bimps\b/.test(ctx);
+      // Last number is usually running balance; use second-to-last (or first) as tx amount
+      const txAmt = amounts.length >= 2 ? amounts[amounts.length - 2] : amounts[0];
       if (isDr) debit = txAmt;
       else if (isCr) credit = txAmt;
       else {
@@ -190,7 +203,7 @@ function extractPdfTransactions(lines: string[]): BankRow[] | { error: string } 
       category: cat,
       importAs: isRevenue ? 'revenue' : isCredit ? 'revenue' : 'personal-expense',
       selected: true,
-      balance: amounts[amounts.length - 1],
+      balance: amtMatches.filter((a) => !a.signed).slice(-1)[0]?.v,
     });
   }
 

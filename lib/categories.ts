@@ -26,9 +26,21 @@ export function guessCategory(desc: string): { cat: string; isRevenue: boolean }
 
 export function normalizeDate(raw: string): string {
   if (!raw) return '';
+  // "01 Feb, 2026" or "01 Feb 2026" (Kotak, Axis, etc.)
+  const MONTHS: Record<string, string> = {
+    jan:'01',feb:'02',mar:'03',apr:'04',may:'05',jun:'06',
+    jul:'07',aug:'08',sep:'09',oct:'10',nov:'11',dec:'12',
+  };
+  const mMatch = raw.trim().match(/^(\d{1,2})\s+([A-Za-z]{3})[a-z]*,?\s*(\d{4})$/i);
+  if (mMatch) {
+    const [, d, mon, y] = mMatch;
+    const m = MONTHS[mon.toLowerCase().slice(0, 3)] || '01';
+    return `${y}-${m}-${d.padStart(2, '0')}`;
+  }
+  // DD/MM/YYYY or DD-MM-YYYY
   const parts = raw.split(/[\/\-]/);
   if (parts.length !== 3) return raw;
-  if (parts[0].length === 4) return raw; // already YYYY-MM-DD
+  if (parts[0].length === 4) return raw;
   const [d, m, y] = parts;
   const year = y.length === 2 ? '20' + y : y;
   return `${year}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
