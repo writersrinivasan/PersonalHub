@@ -91,10 +91,14 @@ export function parseBankCsv(text: string): BankRow[] | { error: string } {
 }
 
 export async function parseBankPdf(arrayBuffer: ArrayBuffer): Promise<BankRow[] | { error: string }> {
-  const pdfjsLib = (await import('pdfjs-dist')).default || (await import('pdfjs-dist'));
-  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pdfjs: any = await import('pdfjs-dist');
+  const pdfjsLib = pdfjs.default ?? pdfjs;
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-  let pdf: Awaited<ReturnType<typeof pdfjsLib.getDocument>['promise']>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let pdf: any;
   try {
     pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
   } catch (e: unknown) {
