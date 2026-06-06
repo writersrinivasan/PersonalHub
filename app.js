@@ -13,9 +13,170 @@ const escape = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace
 const DB = {
   get: k => { try { return JSON.parse(localStorage.getItem(k)) || []; } catch { return []; } },
   set: (k, v) => localStorage.setItem(k, JSON.stringify(v)),
-  getObj: k => { try { return JSON.parse(localStorage.getItem(k)) || {}; } catch { return {}; } },
-  setObj: (k, v) => localStorage.setItem(k, JSON.stringify(v))
 };
+
+// ============================================================
+// GOOGLE CALENDAR INTEGRATION
+// ============================================================
+const GCal = {
+  clientId: localStorage.getItem('gcal_client_id') || '',
+  _token: null,
+  _events: [],
+  _gapiReady: false,
+  _gisReady: false,
+  tokenClient: null,
+
+  // Called when https://apis.google.com/js/api.js finishes loading
+  onGapiLoad() {
+    gapi.load('client', async () => {
+      await gapi.client.init({
+        discoveryDocs: ['https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest']
+      });
+      this._gapiReady = true;
+      // If user was previously connected, silently refresh
+      if (localStorage.getItem('gcal_connected') && this.clientId && this._gisReady) {
+        this._tryConnect('');
+      }
+    });
+  },
+
+  // Called when https://accounts.google.com/gsi/client finishes loading
+  onGisLoad() {
+    this._gisReady = true;
+    if (this.clientId) this._initTokenClient();
+    // If gapi already ready, attempt silent connect
+    if (localStorage.getItem('gcal_connected') && this._gapiReady) {
+      this._tryConnect('');
+    }
+  },
+
+  _initTokenClient() {
+    if (!window.google?.accounts?.oauth2 || !this.clientId) return;
+    this.tokenClient = google.accounts.oauth2.initTokenClient({
+      client_id: this.clientId,
+      scope: 'https://www.googleapis.com/auth/calendar.events',
+      callback: async resp => {
+        if (resp.error) { console.error('GCal OAuth error:', resp); return; }
+        this._token = resp;
+        gapi.client.setToken(resp);
+        localStorage.setItem('gcal_connected', '1');
+        await this.fetchEvents();
+        this._refreshCalendarBadge();
+        if (currentView === 'schedule') navigate('schedule');
+      }
+    });
+  },
+
+  _tryConnect(prompt) {
+    if (!this.tokenClient) this._initTokenClient();
+    if (this.tokenClient) this.tokenClient.requestAccessToken({ prompt });
+  },
+
+  get isConnected() { return !!this._token; },
+
+  connect() {
+    if (!this.clientId) { App.openModal('gcal-setup'); return; }
+    if (!this._gisReady || !this._gapiReady) {
+      alert('Google APIs are still loading. Please try again in a moment.');
+      return;
+    }
+    this._tryConnect(this._token ? '' : 'consent');
+  },
+
+  disconnect() {
+    if (this._token?.access_token) {
+      google.accounts.oauth2.revoke(this._token.access_token, () => {});
+    }
+    this._token = null;
+    this._events = [];
+    localStorage.removeItem('gcal_connected');
+    this._refreshCalendarBadge();
+    navigate(currentView);
+  },
+
+  async fetchEvents() {
+    if (!this._token || !this._gapiReady) return;
+    gapi.client.setToken(this._token);
+    const year = calendarDate.getFullYear();
+    const month = calendarDate.getMonth();
+    try {
+      const resp = await gapi.client.calendar.events.list({
+        calendarId: 'primary',
+        timeMin: new Date(year, month, 1).toISOString(),
+        timeMax: new Date(year, month + 1, 1).toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime',
+        maxResults: 100
+      });
+      this._events = resp.result.items || [];
+    } catch (e) {
+      if (e.status === 401) {
+        this._token = null;
+        localStorage.removeItem('gcal_connected');
+      }
+      this._events = [];
+    }
+  },
+
+  forDate(dateStr) {
+    return this._events.filter(e => {
+      const d = (e.start?.date || e.start?.dateTime || '').slice(0, 10);
+      return d === dateStr;
+    });
+  },
+
+  async addEvent(data) {
+    if (!this._token || !this._gapiReady) return false;
+    gapi.client.setToken(this._token);
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    try {
+      await gapi.client.calendar.events.insert({
+        calendarId: 'primary',
+        resource: {
+          summary: data.title,
+          description: data.description || '',
+          start: data.startTime
+            ? { dateTime: `${data.dueDate}T${data.startTime}:00`, timeZone: tz }
+            : { date: data.dueDate },
+          end: data.endTime
+            ? { dateTime: `${data.dueDate}T${data.endTime}:00`, timeZone: tz }
+            : { date: data.dueDate }
+        }
+      });
+      return true;
+    } catch (e) {
+      console.error('GCal addEvent failed:', e);
+      return false;
+    }
+  },
+
+  saveClientId(cid) {
+    this.clientId = cid.trim();
+    localStorage.setItem('gcal_client_id', this.clientId);
+    document.getElementById('modal-overlay').classList.add('hidden');
+    this._initTokenClient();
+    setTimeout(() => this._tryConnect('consent'), 100);
+  },
+
+  _refreshCalendarBadge() {
+    const badge = document.getElementById('gcal-badge');
+    if (badge) badge.outerHTML = gcalBadgeHTML();
+  }
+};
+
+function gcalBadgeHTML() {
+  if (GCal.isConnected) {
+    return `<span id="gcal-badge" class="gcal-badge connected">
+      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+      Google Calendar
+      <button onclick="GCal.disconnect()" class="gcal-disconnect">Disconnect</button>
+    </span>`;
+  }
+  return `<button id="gcal-badge" class="gcal-badge disconnected" onclick="GCal.connect()">
+    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+    Connect Google Calendar
+  </button>`;
+}
 
 // ============================================================
 // SAMPLE DATA
@@ -128,9 +289,12 @@ function navigate(view) {
   }
 }
 
-function afterRender(view) {
+async function afterRender(view) {
   if (view === 'dashboard') initDashboardCharts();
-  if (view === 'schedule') bindCalendarNav();
+  if (view === 'schedule') {
+    bindCalendarNav();
+    if (GCal.isConnected) await GCal.fetchEvents().then(() => navigate('schedule'));
+  }
   if (view === 'revenue') initRevenueChart();
   if (view === 'personal-expenses' || view === 'professional-expenses') initExpenseChart(view === 'personal-expenses' ? 'personal' : 'professional');
   if (view === 'pnl') initPnLChart();
@@ -150,9 +314,7 @@ function renderDashboard() {
   const weekEnd = daysAhead(7);
   const weekTasks = tasks.filter(t => t.dueDate >= today() && t.dueDate <= weekEnd && t.status !== 'done');
   const monthRevenue = revenue.reduce((s, r) => s + Number(r.amount), 0);
-  const monthPersonalExp = personalExp.reduce((s, e) => s + Number(e.amount), 0);
-  const monthProfExp = profExp.reduce((s, e) => s + Number(e.amount), 0);
-  const totalExp = monthPersonalExp + monthProfExp;
+  const totalExp = personalExp.reduce((s,e) => s + Number(e.amount), 0) + profExp.reduce((s,e) => s + Number(e.amount), 0);
   const netPL = monthRevenue - totalExp;
   const upcomingBookings = bookings.filter(b => b.date >= today() && b.status !== 'cancelled').slice(0, 3);
   const recentTasks = tasks.filter(t => t.status !== 'done').sort((a,b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 5);
@@ -164,16 +326,10 @@ function renderDashboard() {
     ${statCard('Total Revenue', formatCurrency(monthRevenue), 'bg-green-50', '#059669', svgMoney(), 'this month')}
     ${statCard('Net P&L', formatCurrency(netPL), netPL >= 0 ? 'bg-green-50' : 'bg-red-50', netPL >= 0 ? '#059669' : '#dc2626', svgChart(), netPL >= 0 ? 'Profit ↑' : 'Loss ↓')}
   </div>
-
   <div class="grid grid-cols-3 gap-4 mb-6">
     <div class="col-span-2 card">
-      <div class="card-header">
-        <span class="section-title">Revenue vs Expenses</span>
-        <span class="text-xs text-gray-400">This month</span>
-      </div>
-      <div class="card-body">
-        <canvas id="chart-overview" height="120"></canvas>
-      </div>
+      <div class="card-header"><span class="section-title">Revenue vs Expenses</span><span class="text-xs text-gray-400">This month</span></div>
+      <div class="card-body"><canvas id="chart-overview" height="120"></canvas></div>
     </div>
     <div class="card">
       <div class="card-header"><span class="section-title">Task Status</span></div>
@@ -187,7 +343,6 @@ function renderDashboard() {
       </div>
     </div>
   </div>
-
   <div class="grid grid-cols-2 gap-4">
     <div class="card">
       <div class="card-header">
@@ -207,7 +362,6 @@ function renderDashboard() {
           </div>`).join('')}
       </div>
     </div>
-
     <div class="card">
       <div class="card-header">
         <span class="section-title">Upcoming Client Bookings</span>
@@ -245,7 +399,6 @@ function initDashboardCharts() {
   const todo = tasks.filter(t => t.status === 'todo').length;
   const inprog = tasks.filter(t => t.status === 'in-progress').length;
   const done = tasks.filter(t => t.status === 'done').length;
-
   const revenue = DB.get('revenue').reduce((s,r) => s + Number(r.amount), 0);
   const personalExp = DB.get('personal_expenses').reduce((s,e) => s + Number(e.amount), 0);
   const profExp = DB.get('professional_expenses').reduce((s,e) => s + Number(e.amount), 0);
@@ -260,34 +413,25 @@ function initDashboardCharts() {
       labels: ['Revenue', 'Personal Exp', 'Business Exp', 'Net P&L'],
       datasets: [{
         data: [revenue, personalExp, profExp, revenue - personalExp - profExp],
-        backgroundColor: [
-          'rgba(16,185,129,0.8)', 'rgba(99,102,241,0.8)',
-          'rgba(245,158,11,0.8)', revenue - personalExp - profExp >= 0 ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.8)'
-        ],
+        backgroundColor: ['rgba(16,185,129,0.8)','rgba(99,102,241,0.8)','rgba(245,158,11,0.8)', revenue-personalExp-profExp >= 0 ? 'rgba(16,185,129,0.9)' : 'rgba(239,68,68,0.8)'],
         borderRadius: 6, borderSkipped: false
       }]
     },
     options: {
       plugins: { legend: { display: false } },
-      scales: {
-        y: { grid: { color: '#f3f4f6' }, ticks: { callback: v => '₹' + (v/1000).toFixed(0) + 'k' } },
-        x: { grid: { display: false } }
-      }
+      scales: { y: { grid: { color: '#f3f4f6' }, ticks: { callback: v => '₹'+(v/1000).toFixed(0)+'k' } }, x: { grid: { display: false } } }
     }
   });
 
   chartInstances.tasks = new Chart(c2, {
     type: 'doughnut',
-    data: {
-      labels: ['To Do', 'In Progress', 'Done'],
-      datasets: [{ data: [todo, inprog, done], backgroundColor: ['#6366f1', '#f59e0b', '#10b981'], borderWidth: 0, hoverOffset: 4 }]
-    },
+    data: { labels: ['To Do','In Progress','Done'], datasets: [{ data: [todo,inprog,done], backgroundColor: ['#6366f1','#f59e0b','#10b981'], borderWidth: 0, hoverOffset: 4 }] },
     options: { plugins: { legend: { display: false } }, cutout: '65%' }
   });
 }
 
 // ============================================================
-// VIEW: SCHEDULE (CALENDAR)
+// VIEW: SCHEDULE (CALENDAR) — with Google Calendar events
 // ============================================================
 function renderSchedule() {
   const tasks = DB.get('tasks');
@@ -299,14 +443,14 @@ function renderSchedule() {
   const firstDay = new Date(year, month, 1).getDay();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const daysInPrevMonth = new Date(year, month, 0).getDate();
+  const todayStr = today();
 
-  const getEvents = dateStr => {
+  const getLocalEvents = dateStr => {
     const t = tasks.filter(t => t.dueDate === dateStr);
     const b = bookings.filter(b => b.date === dateStr);
     return [...t.map(t => ({ ...t, _kind: 'task' })), ...b.map(b => ({ ...b, _kind: 'booking' }))];
   };
 
-  const todayStr = today();
   let cells = '';
   const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
 
@@ -314,26 +458,28 @@ function renderSchedule() {
     let dayNum, dateStr, isOtherMonth = false;
     if (i < firstDay) {
       dayNum = daysInPrevMonth - firstDay + i + 1;
-      const d = new Date(year, month - 1, dayNum);
-      dateStr = fmt(d); isOtherMonth = true;
+      dateStr = fmt(new Date(year, month - 1, dayNum)); isOtherMonth = true;
     } else if (i >= firstDay + daysInMonth) {
       dayNum = i - firstDay - daysInMonth + 1;
-      const d = new Date(year, month + 1, dayNum);
-      dateStr = fmt(d); isOtherMonth = true;
+      dateStr = fmt(new Date(year, month + 1, dayNum)); isOtherMonth = true;
     } else {
       dayNum = i - firstDay + 1;
       dateStr = `${year}-${String(month+1).padStart(2,'0')}-${String(dayNum).padStart(2,'0')}`;
     }
 
+    const localEvents = getLocalEvents(dateStr);
+    const gcalEvents = GCal.forDate(dateStr);
+    const allEvents = [
+      ...localEvents.map(e => ({ label: e._kind === 'booking' ? e.clientName : e.title, cls: e._kind === 'booking' ? 'client' : e.type })),
+      ...gcalEvents.map(e => ({ label: e.summary || '(no title)', cls: 'google' }))
+    ];
     const isToday = dateStr === todayStr;
-    const events = getEvents(dateStr);
-    const evHTML = events.slice(0, 3).map(ev => {
-      const cls = ev._kind === 'booking' ? 'client' : ev.type;
-      const lbl = ev._kind === 'booking' ? ev.clientName : ev.title;
-      return `<div class="cal-event ${cls}">${escape(lbl)}</div>`;
-    }).join('') + (events.length > 3 ? `<div class="cal-event" style="color:#9ca3af">+${events.length-3} more</div>` : '');
 
-    cells += `<div class="calendar-day ${isOtherMonth ? 'other-month' : ''} ${isToday ? 'today' : ''}" onclick="App.addTaskForDate('${dateStr}')">
+    const evHTML = allEvents.slice(0, 3).map(ev =>
+      `<div class="cal-event ${ev.cls}" title="${escape(ev.label)}">${escape(ev.label)}</div>`
+    ).join('') + (allEvents.length > 3 ? `<div class="cal-event" style="color:#9ca3af">+${allEvents.length-3} more</div>` : '');
+
+    cells += `<div class="calendar-day ${isOtherMonth?'other-month':''} ${isToday?'today':''}" onclick="App.addTaskForDate('${dateStr}')">
       <div class="day-num">${dayNum}</div>
       ${evHTML}
     </div>`;
@@ -344,11 +490,15 @@ function renderSchedule() {
 
   return `
   <div class="flex items-center justify-between mb-5">
-    <h2 class="text-lg font-bold text-gray-800">${monthName}</h2>
+    <div class="flex items-center gap-3">
+      <h2 class="text-lg font-bold text-gray-800">${monthName}</h2>
+      ${gcalBadgeHTML()}
+    </div>
     <div class="flex gap-2">
       <button class="btn btn-secondary btn-sm" id="cal-prev">← Prev</button>
       <button class="btn btn-secondary btn-sm" id="cal-today">Today</button>
       <button class="btn btn-secondary btn-sm" id="cal-next">Next →</button>
+      ${GCal.isConnected ? `<button class="btn btn-secondary btn-sm" id="cal-sync" onclick="GCal.fetchEvents().then(()=>navigate('schedule'))">↺ Sync</button>` : ''}
       <button class="btn btn-primary btn-sm" onclick="App.openModal('task')">+ Add Event</button>
     </div>
   </div>
@@ -356,24 +506,28 @@ function renderSchedule() {
     <div class="grid grid-cols-7">${dayLabels}</div>
     <div class="calendar-grid">${cells}</div>
   </div>
-  <div class="mt-4 flex gap-4 text-xs text-gray-500">
+  <div class="mt-4 flex flex-wrap gap-4 text-xs text-gray-500">
     <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-indigo-200 inline-block"></span>Personal</span>
     <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-green-200 inline-block"></span>Professional</span>
     <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-purple-200 inline-block"></span>Client</span>
+    <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-blue-200 inline-block"></span>Google Calendar</span>
   </div>`;
 }
 
 function bindCalendarNav() {
-  document.getElementById('cal-prev')?.addEventListener('click', () => {
+  document.getElementById('cal-prev')?.addEventListener('click', async () => {
     calendarDate.setMonth(calendarDate.getMonth() - 1);
+    if (GCal.isConnected) await GCal.fetchEvents();
     navigate('schedule');
   });
-  document.getElementById('cal-next')?.addEventListener('click', () => {
+  document.getElementById('cal-next')?.addEventListener('click', async () => {
     calendarDate.setMonth(calendarDate.getMonth() + 1);
+    if (GCal.isConnected) await GCal.fetchEvents();
     navigate('schedule');
   });
-  document.getElementById('cal-today')?.addEventListener('click', () => {
+  document.getElementById('cal-today')?.addEventListener('click', async () => {
     calendarDate = new Date();
+    if (GCal.isConnected) await GCal.fetchEvents();
     navigate('schedule');
   });
 }
@@ -384,13 +538,11 @@ function bindCalendarNav() {
 function renderTasks() {
   const tasks = DB.get('tasks');
   const filtered = taskFilter === 'all' ? tasks : tasks.filter(t => t.type === taskFilter);
-
   const cols = [
     { id: 'todo', label: 'To Do', color: '#6366f1', bg: '#f5f3ff' },
     { id: 'in-progress', label: 'In Progress', color: '#f59e0b', bg: '#fffbeb' },
     { id: 'done', label: 'Done', color: '#10b981', bg: '#f0fdf4' }
   ];
-
   return `
   <div class="filter-tabs">
     <button class="filter-tab ${taskFilter==='all'?'active':''}" onclick="App.setTaskFilter('all')">All Tasks</button>
@@ -401,8 +553,7 @@ function renderTasks() {
   <div class="grid grid-cols-3 gap-4">
     ${cols.map(col => {
       const colTasks = filtered.filter(t => t.status === col.id);
-      return `
-      <div class="kanban-col" style="background:${col.bg}">
+      return `<div class="kanban-col" style="background:${col.bg}">
         <div class="flex items-center justify-between mb-3">
           <div class="flex items-center gap-2">
             <div class="w-2.5 h-2.5 rounded-full" style="background:${col.color}"></div>
@@ -432,6 +583,7 @@ function taskCard(t) {
       <div class="text-xs text-gray-400">${formatDate(t.dueDate)}</div>
     </div>
     ${t.startTime ? `<div class="text-xs text-gray-400 mt-1">⏰ ${t.startTime}${t.endTime ? ' – '+t.endTime : ''}</div>` : ''}
+    ${t.syncedToGCal ? `<div class="text-xs mt-1" style="color:#1a73e8">📅 Synced to Google Calendar</div>` : ''}
   </div>`;
 }
 
@@ -442,7 +594,6 @@ function renderExpenses(type) {
   const expenses = DB.get(type === 'personal' ? 'personal_expenses' : 'professional_expenses');
   const total = expenses.reduce((s,e) => s + Number(e.amount), 0);
   const taxTotal = type === 'professional' ? expenses.filter(e => e.taxDeductible).reduce((s,e) => s + Number(e.amount), 0) : 0;
-
   const catTotals = {};
   expenses.forEach(e => { catTotals[e.category] = (catTotals[e.category] || 0) + Number(e.amount); });
   const topCat = Object.entries(catTotals).sort((a,b) => b[1]-a[1])[0];
@@ -453,7 +604,6 @@ function renderExpenses(type) {
     ${statCard('Top Category', topCat ? topCat[0] : 'N/A', 'bg-amber-50', '#d97706', svgTag(), topCat ? formatCurrency(topCat[1]) : '')}
     ${type === 'professional' ? statCard('Tax Deductible', formatCurrency(taxTotal), 'bg-green-50', '#059669', svgCheck(), `${expenses.filter(e=>e.taxDeductible).length} items`) : statCard('Transactions', expenses.length, 'bg-indigo-50', '#4f46e5', svgTask(), 'entries')}
   </div>
-
   <div class="grid grid-cols-3 gap-4 mb-5">
     <div class="col-span-2 card">
       <div class="card-header">
@@ -463,11 +613,10 @@ function renderExpenses(type) {
       <table class="data-table">
         <thead><tr>
           <th>Description</th><th>Category</th><th>Date</th><th>Payment</th>
-          ${type === 'professional' ? '<th>Tax</th>' : ''}
-          <th>Amount</th><th></th>
+          ${type === 'professional' ? '<th>Tax</th>' : ''}<th>Amount</th><th></th>
         </tr></thead>
         <tbody>
-        ${expenses.length === 0 ? `<tr><td colspan="7" class="text-center text-gray-400 py-8">No expenses yet. Add your first one!</td></tr>` :
+        ${expenses.length === 0 ? `<tr><td colspan="7" class="text-center text-gray-400 py-8">No expenses yet.</td></tr>` :
           expenses.sort((a,b) => b.date.localeCompare(a.date)).map(e => `
           <tr>
             <td class="font-medium">${escape(e.description)}</td>
@@ -476,7 +625,7 @@ function renderExpenses(type) {
             <td class="text-gray-500">${escape(e.paymentMethod)}</td>
             ${type === 'professional' ? `<td>${e.taxDeductible ? '<span class="badge badge-confirmed">✓ Yes</span>' : '<span style="color:#9ca3af">—</span>'}</td>` : ''}
             <td class="font-semibold text-red-600">${formatCurrency(e.amount)}</td>
-            <td><button class="btn-icon" onclick="App.deleteItem('${type === 'personal' ? 'personal_expenses' : 'professional_expenses'}','${e.id}','${type === 'personal' ? 'personal-expenses' : 'professional-expenses'}')">
+            <td><button class="btn-icon" onclick="App.deleteItem('${type==='personal'?'personal_expenses':'professional_expenses'}','${e.id}','${type==='personal'?'personal-expenses':'professional-expenses'}')">
               <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
             </button></td>
           </tr>`).join('')}
@@ -485,9 +634,7 @@ function renderExpenses(type) {
     </div>
     <div class="card">
       <div class="card-header"><span class="section-title">By Category</span></div>
-      <div class="card-body">
-        <canvas id="chart-expense" width="200" height="200"></canvas>
-      </div>
+      <div class="card-body"><canvas id="chart-expense" width="200" height="200"></canvas></div>
     </div>
   </div>`;
 }
@@ -501,10 +648,7 @@ function initExpenseChart(type) {
   const colors = ['#6366f1','#f59e0b','#10b981','#ef4444','#8b5cf6','#06b6d4','#f97316','#84cc16'];
   chartInstances.expense = new Chart(c, {
     type: 'doughnut',
-    data: {
-      labels: Object.keys(catTotals),
-      datasets: [{ data: Object.values(catTotals), backgroundColor: colors, borderWidth: 0, hoverOffset: 4 }]
-    },
+    data: { labels: Object.keys(catTotals), datasets: [{ data: Object.values(catTotals), backgroundColor: colors, borderWidth: 0, hoverOffset: 4 }] },
     options: { plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, padding: 10 } } }, cutout: '55%' }
   });
 }
@@ -516,16 +660,12 @@ function renderRevenue() {
   const revenue = DB.get('revenue');
   const total = revenue.reduce((s,r) => s + Number(r.amount), 0);
   const recurring = revenue.filter(r => r.isRecurring).reduce((s,r) => s + Number(r.amount), 0);
-  const catMap = {};
-  revenue.forEach(r => { catMap[r.category] = (catMap[r.category] || 0) + Number(r.amount); });
-
   return `
   <div class="grid grid-cols-3 gap-4 mb-5">
     ${statCard('Total Revenue', formatCurrency(total), 'bg-green-50', '#059669', svgMoney(), 'This month')}
     ${statCard('Recurring Income', formatCurrency(recurring), 'bg-indigo-50', '#4f46e5', svgRepeat(), `${revenue.filter(r=>r.isRecurring).length} sources`)}
     ${statCard('Revenue Sources', revenue.length, 'bg-purple-50', '#7c3aed', svgTag(), 'unique entries')}
   </div>
-
   <div class="grid grid-cols-3 gap-4">
     <div class="col-span-2 card">
       <div class="card-header">
@@ -552,9 +692,7 @@ function renderRevenue() {
     </div>
     <div class="card">
       <div class="card-header"><span class="section-title">By Category</span></div>
-      <div class="card-body">
-        <canvas id="chart-revenue" width="200" height="200"></canvas>
-      </div>
+      <div class="card-body"><canvas id="chart-revenue" width="200" height="200"></canvas></div>
     </div>
   </div>`;
 }
@@ -568,10 +706,7 @@ function initRevenueChart() {
   const colors = ['#10b981','#6366f1','#f59e0b','#8b5cf6','#06b6d4','#f97316'];
   chartInstances.revenue = new Chart(c, {
     type: 'doughnut',
-    data: {
-      labels: Object.keys(catMap),
-      datasets: [{ data: Object.values(catMap), backgroundColor: colors, borderWidth: 0, hoverOffset: 4 }]
-    },
+    data: { labels: Object.keys(catMap), datasets: [{ data: Object.values(catMap), backgroundColor: colors, borderWidth: 0, hoverOffset: 4 }] },
     options: { plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, padding: 10 } } }, cutout: '55%' }
   });
 }
@@ -583,7 +718,6 @@ function renderPnL() {
   const revenue = DB.get('revenue');
   const personalExp = DB.get('personal_expenses');
   const profExp = DB.get('professional_expenses');
-
   const totalRevenue = revenue.reduce((s,r) => s + Number(r.amount), 0);
   const totalPersonal = personalExp.reduce((s,e) => s + Number(e.amount), 0);
   const totalProfessional = profExp.reduce((s,e) => s + Number(e.amount), 0);
@@ -591,80 +725,42 @@ function renderPnL() {
   const netPL = totalRevenue - totalExpenses;
   const margin = totalRevenue > 0 ? ((netPL / totalRevenue) * 100).toFixed(1) : 0;
   const taxDeductible = profExp.filter(e => e.taxDeductible).reduce((s,e) => s + Number(e.amount), 0);
-
   const revByCat = {};
   revenue.forEach(r => { revByCat[r.category] = (revByCat[r.category] || 0) + Number(r.amount); });
 
   return `
   <div class="grid grid-cols-4 gap-4 mb-6">
     ${statCard('Total Revenue', formatCurrency(totalRevenue), 'bg-green-50', '#059669', svgMoney(), `${revenue.length} sources`)}
-    ${statCard('Total Expenses', formatCurrency(totalExpenses), 'bg-red-50', '#dc2626', svgTask(), `Personal + Business`)}
+    ${statCard('Total Expenses', formatCurrency(totalExpenses), 'bg-red-50', '#dc2626', svgTask(), 'Personal + Business')}
     ${statCard('Net P&L', formatCurrency(netPL), netPL >= 0 ? 'bg-green-50' : 'bg-red-50', netPL >= 0 ? '#059669' : '#dc2626', svgChart(), netPL >= 0 ? '↑ Profit' : '↓ Loss')}
     ${statCard('Profit Margin', margin + '%', 'bg-indigo-50', '#4f46e5', svgPercent(), netPL >= 0 ? 'Healthy' : 'Below 0')}
   </div>
-
   <div class="grid grid-cols-2 gap-4 mb-4">
     <div class="card">
       <div class="card-header"><span class="section-title">Income Statement</span></div>
       <div class="card-body">
-        <div class="pnl-row">
-          <span class="font-semibold text-green-700">Revenue</span>
-          <span class="font-semibold text-green-700">${formatCurrency(totalRevenue)}</span>
-        </div>
+        <div class="pnl-row"><span class="font-semibold text-green-700">Revenue</span><span class="font-semibold text-green-700">${formatCurrency(totalRevenue)}</span></div>
         ${Object.entries(revByCat).map(([cat, amt]) => `
-          <div class="pnl-row pl-4">
-            <span class="text-gray-600 text-sm">${escape(cat)}</span>
-            <span class="text-gray-600 text-sm">${formatCurrency(amt)}</span>
-          </div>`).join('')}
-
-        <div class="pnl-row mt-2">
-          <span class="font-semibold text-red-600">Total Expenses</span>
-          <span class="font-semibold text-red-600">(${formatCurrency(totalExpenses)})</span>
-        </div>
-        <div class="pnl-row pl-4">
-          <span class="text-gray-600 text-sm">Personal</span>
-          <span class="text-gray-600 text-sm">(${formatCurrency(totalPersonal)})</span>
-        </div>
-        <div class="pnl-row pl-4">
-          <span class="text-gray-600 text-sm">Business</span>
-          <span class="text-gray-600 text-sm">(${formatCurrency(totalProfessional)})</span>
-        </div>
-
-        <div class="pnl-row pnl-total">
-          <span class="${netPL >= 0 ? 'pnl-positive' : 'pnl-negative'}">Net Profit / Loss</span>
-          <span class="${netPL >= 0 ? 'pnl-positive' : 'pnl-negative'}">${netPL >= 0 ? '' : '('}${formatCurrency(Math.abs(netPL))}${netPL >= 0 ? '' : ')'}</span>
-        </div>
-        <div class="pnl-row">
-          <span class="text-gray-500 text-sm">Tax Deductible Expenses</span>
-          <span class="text-sm font-medium text-indigo-600">${formatCurrency(taxDeductible)}</span>
-        </div>
+          <div class="pnl-row pl-4"><span class="text-gray-600 text-sm">${escape(cat)}</span><span class="text-gray-600 text-sm">${formatCurrency(amt)}</span></div>`).join('')}
+        <div class="pnl-row mt-2"><span class="font-semibold text-red-600">Total Expenses</span><span class="font-semibold text-red-600">(${formatCurrency(totalExpenses)})</span></div>
+        <div class="pnl-row pl-4"><span class="text-gray-600 text-sm">Personal</span><span class="text-gray-600 text-sm">(${formatCurrency(totalPersonal)})</span></div>
+        <div class="pnl-row pl-4"><span class="text-gray-600 text-sm">Business</span><span class="text-gray-600 text-sm">(${formatCurrency(totalProfessional)})</span></div>
+        <div class="pnl-row pnl-total"><span class="${netPL >= 0 ? 'pnl-positive' : 'pnl-negative'}">Net Profit / Loss</span><span class="${netPL >= 0 ? 'pnl-positive' : 'pnl-negative'}">${netPL >= 0 ? '' : '('}${formatCurrency(Math.abs(netPL))}${netPL >= 0 ? '' : ')'}</span></div>
+        <div class="pnl-row"><span class="text-gray-500 text-sm">Tax Deductible Expenses</span><span class="text-sm font-medium text-indigo-600">${formatCurrency(taxDeductible)}</span></div>
       </div>
     </div>
-
     <div class="card">
       <div class="card-header"><span class="section-title">Revenue vs Expenses</span></div>
-      <div class="card-body">
-        <canvas id="chart-pnl" height="230"></canvas>
-      </div>
+      <div class="card-body"><canvas id="chart-pnl" height="230"></canvas></div>
     </div>
   </div>
-
   <div class="card">
     <div class="card-header"><span class="section-title">Quick Summary</span></div>
     <div class="card-body">
       <div class="grid grid-cols-3 gap-4 text-center">
-        <div class="p-4 bg-green-50 rounded-xl">
-          <div class="text-2xl font-bold text-green-700">${formatCurrency(totalRevenue)}</div>
-          <div class="text-sm text-green-600 mt-1">Total Income</div>
-        </div>
-        <div class="p-4 bg-red-50 rounded-xl">
-          <div class="text-2xl font-bold text-red-700">${formatCurrency(totalExpenses)}</div>
-          <div class="text-sm text-red-600 mt-1">Total Spent</div>
-        </div>
-        <div class="p-4 ${netPL >= 0 ? 'bg-indigo-50' : 'bg-orange-50'} rounded-xl">
-          <div class="text-2xl font-bold ${netPL >= 0 ? 'text-indigo-700' : 'text-orange-700'}">${formatCurrency(Math.abs(netPL))}</div>
-          <div class="text-sm ${netPL >= 0 ? 'text-indigo-600' : 'text-orange-600'} mt-1">${netPL >= 0 ? 'Net Profit' : 'Net Loss'}</div>
-        </div>
+        <div class="p-4 bg-green-50 rounded-xl"><div class="text-2xl font-bold text-green-700">${formatCurrency(totalRevenue)}</div><div class="text-sm text-green-600 mt-1">Total Income</div></div>
+        <div class="p-4 bg-red-50 rounded-xl"><div class="text-2xl font-bold text-red-700">${formatCurrency(totalExpenses)}</div><div class="text-sm text-red-600 mt-1">Total Spent</div></div>
+        <div class="p-4 ${netPL >= 0 ? 'bg-indigo-50' : 'bg-orange-50'} rounded-xl"><div class="text-2xl font-bold ${netPL >= 0 ? 'text-indigo-700' : 'text-orange-700'}">${formatCurrency(Math.abs(netPL))}</div><div class="text-sm ${netPL >= 0 ? 'text-indigo-600' : 'text-orange-600'} mt-1">${netPL >= 0 ? 'Net Profit' : 'Net Loss'}</div></div>
       </div>
     </div>
   </div>`;
@@ -678,21 +774,8 @@ function initPnLChart() {
   const be = DB.get('professional_expenses').reduce((s,e) => s + Number(e.amount), 0);
   chartInstances.pnl = new Chart(c, {
     type: 'bar',
-    data: {
-      labels: ['Revenue', 'Personal Exp', 'Business Exp'],
-      datasets: [{
-        data: [rev, pe, be],
-        backgroundColor: ['rgba(16,185,129,0.8)', 'rgba(239,68,68,0.7)', 'rgba(245,158,11,0.7)'],
-        borderRadius: 8, borderSkipped: false
-      }]
-    },
-    options: {
-      plugins: { legend: { display: false } },
-      scales: {
-        y: { grid: { color: '#f3f4f6' }, ticks: { callback: v => '₹' + (v/1000).toFixed(0) + 'k' } },
-        x: { grid: { display: false } }
-      }
-    }
+    data: { labels: ['Revenue','Personal Exp','Business Exp'], datasets: [{ data: [rev,pe,be], backgroundColor: ['rgba(16,185,129,0.8)','rgba(239,68,68,0.7)','rgba(245,158,11,0.7)'], borderRadius: 8, borderSkipped: false }] },
+    options: { plugins: { legend: { display: false } }, scales: { y: { grid: { color: '#f3f4f6' }, ticks: { callback: v => '₹'+(v/1000).toFixed(0)+'k' } }, x: { grid: { display: false } } } }
   });
 }
 
@@ -703,14 +786,12 @@ function renderClientBookings() {
   const bookings = DB.get('client_bookings');
   const upcoming = bookings.filter(b => b.date >= today()).sort((a,b) => a.date.localeCompare(b.date));
   const past = bookings.filter(b => b.date < today()).sort((a,b) => b.date.localeCompare(a.date));
-
   return `
   <div class="grid grid-cols-3 gap-4 mb-5">
     ${statCard('Upcoming', upcoming.length, 'bg-indigo-50', '#4f46e5', svgCalendar(), 'bookings')}
     ${statCard('Confirmed', bookings.filter(b=>b.status==='confirmed').length, 'bg-green-50', '#059669', svgCheck(), 'sessions')}
     ${statCard('Completed', bookings.filter(b=>b.status==='completed').length, 'bg-purple-50', '#7c3aed', svgTask(), 'total')}
   </div>
-
   <div class="grid grid-cols-2 gap-4">
     <div class="card">
       <div class="card-header">
@@ -718,17 +799,13 @@ function renderClientBookings() {
         <button class="btn btn-primary btn-sm" onclick="App.openModal('booking')">+ New Booking</button>
       </div>
       <div class="card-body p-0">
-      ${upcoming.length === 0 ? '<div class="empty-state">No upcoming bookings.<br><small>Share your booking link with clients.</small></div>' :
-        upcoming.map(b => bookingCard(b)).join('')}
+      ${upcoming.length === 0 ? '<div class="empty-state">No upcoming bookings.</div>' : upcoming.map(b => bookingCard(b)).join('')}
       </div>
     </div>
     <div class="card">
-      <div class="card-header">
-        <span class="section-title">Past Bookings</span>
-      </div>
+      <div class="card-header"><span class="section-title">Past Bookings</span></div>
       <div class="card-body p-0">
-      ${past.length === 0 ? '<div class="empty-state">No past bookings yet.</div>' :
-        past.map(b => bookingCard(b)).join('')}
+      ${past.length === 0 ? '<div class="empty-state">No past bookings yet.</div>' : past.map(b => bookingCard(b)).join('')}
       </div>
     </div>
   </div>`;
@@ -743,9 +820,10 @@ function bookingCard(b) {
         <span class="badge badge-${b.status} flex-shrink-0">${b.status}</span>
       </div>
       <div class="text-xs text-gray-500 mt-0.5">${escape(b.service)}</div>
-      <div class="text-xs text-gray-400 mt-0.5">📅 ${formatDate(b.date)} · ${b.startTime}${b.endTime ? ' – '+b.endTime : ''}</div>
+      <div class="text-xs text-gray-400 mt-0.5">📅 ${formatDate(b.date)} · ${b.startTime}${b.endTime?' – '+b.endTime:''}</div>
       ${b.email ? `<div class="text-xs text-gray-400">✉ ${escape(b.email)}</div>` : ''}
       ${b.notes ? `<div class="text-xs text-indigo-500 mt-0.5 italic">${escape(b.notes)}</div>` : ''}
+      ${b.syncedToGCal ? `<div class="text-xs mt-1" style="color:#1a73e8">📅 Synced to Google Calendar</div>` : ''}
     </div>
     <div class="flex gap-1 items-start">
       ${b.status === 'pending' ? `<button class="btn-icon" title="Confirm" onclick="App.updateBookingStatus('${b.id}','confirmed')">
@@ -761,6 +839,17 @@ function bookingCard(b) {
 // ============================================================
 // MODALS
 // ============================================================
+const gcalCheckbox = (label = 'Also add to Google Calendar') => GCal.isConnected ? `
+  <div class="form-group">
+    <div class="form-check">
+      <input type="checkbox" name="addToGCal" id="add-gcal" checked>
+      <label for="add-gcal" class="form-label" style="margin:0;cursor:pointer;display:flex;align-items:center;gap:6px">
+        <svg style="width:14px;height:14px;color:#1a73e8" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+        ${label}
+      </label>
+    </div>
+  </div>` : '';
+
 const MODALS = {
   task: (data = {}) => `
     <div class="p-6 modal-in">
@@ -824,6 +913,7 @@ const MODALS = {
           <label class="form-label">Description</label>
           <textarea class="form-textarea" name="description" placeholder="Details...">${escape(data.description || '')}</textarea>
         </div>
+        ${!data.id ? gcalCheckbox() : ''}
         <div class="flex gap-3 justify-end mt-2">
           ${data.id ? `<button type="button" class="btn btn-danger" onclick="App.deleteTask('${data.id}')">Delete</button>` : ''}
           <button type="button" class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
@@ -941,6 +1031,7 @@ const MODALS = {
           <label class="form-label">Notes / Agenda</label>
           <textarea class="form-textarea" name="notes" placeholder="What will you discuss? Any prep needed?"></textarea>
         </div>
+        ${gcalCheckbox('Add to Google Calendar & block time')}
         <div class="flex gap-3 justify-end mt-2">
           <button type="button" class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
           <button type="submit" class="btn btn-primary">Book Session</button>
@@ -966,6 +1057,44 @@ const MODALS = {
             <div class="text-xs text-gray-500">${desc}</div>
           </button>`).join('')}
       </div>
+    </div>`,
+
+  'gcal-setup': () => `
+    <div class="p-6 modal-in">
+      <div class="flex items-center justify-between mb-4">
+        <div>
+          <h2 class="text-lg font-bold text-gray-800">Connect Google Calendar</h2>
+          <p class="text-xs text-gray-500 mt-0.5">One-time setup — takes about 2 minutes</p>
+        </div>
+        <button class="btn-icon" onclick="App.closeModal()"><svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
+      </div>
+
+      <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-5 text-sm text-blue-800">
+        <div class="font-semibold mb-2">Quick Setup (3 steps)</div>
+        <ol class="list-decimal list-inside space-y-1 text-xs leading-relaxed">
+          <li>Go to <strong>console.cloud.google.com</strong> → New Project</li>
+          <li>Enable <strong>Google Calendar API</strong> → Create OAuth 2.0 credentials (Web app type)</li>
+          <li>Add your app's URL to <strong>Authorised JavaScript origins</strong>, then paste the Client ID below</li>
+        </ol>
+        <div class="mt-2 text-xs text-blue-600">
+          Full guide: <strong>SETUP_GOOGLE_CALENDAR.md</strong> in your project folder
+        </div>
+      </div>
+
+      <form onsubmit="GCal.saveClientId(this.clientId.value); return false;">
+        <div class="form-group">
+          <label class="form-label">Google OAuth Client ID *</label>
+          <input class="form-input" name="clientId" required
+            value="${escape(GCal.clientId)}"
+            placeholder="123456789-abc.apps.googleusercontent.com"
+            style="font-family:monospace;font-size:0.8rem">
+          <div class="text-xs text-gray-400 mt-1">Found in Google Cloud Console → APIs & Services → Credentials</div>
+        </div>
+        <div class="flex gap-3 justify-end mt-4">
+          <button type="button" class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save & Authorize</button>
+        </div>
+      </form>
     </div>`
 };
 
@@ -1044,14 +1173,13 @@ const App = {
     document.getElementById('modal-overlay').classList.add('hidden');
   },
   openQuickAdd() { this.openModal('quickadd'); },
-  addTaskForDate(dateStr) {
-    this.openModal('task', { dueDate: dateStr });
-  },
+  addTaskForDate(dateStr) { this.openModal('task', { dueDate: dateStr }); },
 
-  saveTask(e, existingId) {
+  async saveTask(e, existingId) {
     e.preventDefault();
     const form = e.target;
     const tasks = DB.get('tasks');
+    const addToGCal = !existingId && form.addToGCal?.checked;
     const taskData = {
       id: existingId || uid(),
       title: form.title.value.trim(),
@@ -1062,11 +1190,15 @@ const App = {
       dueDate: form.dueDate.value,
       startTime: form.startTime.value,
       endTime: form.endTime.value,
-      description: form.description.value.trim()
+      description: form.description.value.trim(),
+      syncedToGCal: false
     };
+    if (addToGCal) {
+      taskData.syncedToGCal = await GCal.addEvent(taskData);
+    }
     if (existingId) {
       const idx = tasks.findIndex(t => t.id === existingId);
-      if (idx !== -1) tasks[idx] = taskData;
+      if (idx !== -1) tasks[idx] = { ...tasks[idx], ...taskData };
     } else {
       tasks.push(taskData);
     }
@@ -1076,8 +1208,7 @@ const App = {
   },
 
   editTask(id) {
-    const tasks = DB.get('tasks');
-    const task = tasks.find(t => t.id === id);
+    const task = DB.get('tasks').find(t => t.id === id);
     if (task) this.openModal('task', task);
   },
 
@@ -1100,7 +1231,7 @@ const App = {
       category: form.category.value,
       date: form.date.value,
       paymentMethod: form.paymentMethod.value,
-      taxDeductible: type === 'professional' ? form.taxDeductible?.checked || false : undefined,
+      taxDeductible: type === 'professional' ? (form.taxDeductible?.checked || false) : undefined,
       notes: form.notes.value.trim()
     });
     DB.set(key, items);
@@ -1128,11 +1259,11 @@ const App = {
     navigate('revenue');
   },
 
-  saveBooking(e) {
+  async saveBooking(e) {
     e.preventDefault();
     const form = e.target;
-    const bookings = DB.get('client_bookings');
-    bookings.push({
+    const addToGCal = form.addToGCal?.checked;
+    const booking = {
       id: uid(),
       clientName: form.clientName.value.trim(),
       email: form.email.value.trim(),
@@ -1142,8 +1273,20 @@ const App = {
       startTime: form.startTime.value,
       endTime: form.endTime.value,
       status: 'pending',
-      notes: form.notes.value.trim()
-    });
+      notes: form.notes.value.trim(),
+      syncedToGCal: false
+    };
+    if (addToGCal) {
+      booking.syncedToGCal = await GCal.addEvent({
+        title: `${booking.service} — ${booking.clientName}`,
+        description: `Client: ${booking.clientName}\nEmail: ${booking.email}\nPhone: ${booking.phone}\nNotes: ${booking.notes}`,
+        dueDate: booking.date,
+        startTime: booking.startTime,
+        endTime: booking.endTime
+      });
+    }
+    const bookings = DB.get('client_bookings');
+    bookings.push(booking);
     DB.set('client_bookings', bookings);
     document.getElementById('modal-overlay').classList.add('hidden');
     navigate('client-bookings');
@@ -1163,10 +1306,7 @@ const App = {
     navigate(view);
   },
 
-  setTaskFilter(f) {
-    taskFilter = f;
-    navigate('tasks');
-  }
+  setTaskFilter(f) { taskFilter = f; navigate('tasks'); }
 };
 
 // ============================================================
@@ -1190,9 +1330,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const userName = localStorage.getItem('ph_user') || 'Srinivasan';
   document.getElementById('user-name-display').textContent = userName;
   document.getElementById('user-avatar').textContent = userName[0].toUpperCase();
-
-  const now = new Date();
-  document.getElementById('current-date').textContent = now.toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+  document.getElementById('current-date').textContent = new Date().toLocaleDateString('en-IN', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
 
   document.querySelectorAll('.nav-item[data-view]').forEach(el => {
     el.addEventListener('click', () => navigate(el.dataset.view));
